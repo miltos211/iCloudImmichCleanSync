@@ -18,8 +18,8 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Build Release
-        run: swift build -c release
+      - name: Build Release (Universal Binary)
+        run: swift build -c release --arch arm64 --arch x86_64
 
       - name: Create App Bundle
         run: |
