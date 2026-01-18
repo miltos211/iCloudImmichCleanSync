@@ -27,8 +27,8 @@ jobs:
           mkdir -p ImmichUploader.app/Contents/MacOS
           mkdir -p ImmichUploader.app/Contents/Resources
 
-          # Copy executable
-          cp .build/release/ImmichUploader ImmichUploader.app/Contents/MacOS/
+          # Copy executable (universal binary path is different)
+          cp .build/apple/Products/Release/ImmichUploader ImmichUploader.app/Contents/MacOS/
 
           # Copy Info.plist
           cp Sources/App/Info.plist ImmichUploader.app/Contents/
