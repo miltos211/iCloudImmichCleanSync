@@ -1,0 +1,15 @@
+# Testing framework
+pytest>=9.0.0
+
+# Core dependencies for the Python orchestrator
+python-dotenv==1.2.1
+requests==2.32.5
+rich==14.2.0
+
+# Dependencies (automatically installed)
+certifi==2025.11.12
+charset-normalizer==3.4.4
+idna==3.11
+markdown-it-py==4.0.0
+mdurl==0.1.2
+urllib3==2.6.2

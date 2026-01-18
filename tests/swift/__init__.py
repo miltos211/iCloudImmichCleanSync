@@ -1,0 +1,1 @@
+# Test utilities for Swift photo-exporter binary

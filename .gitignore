@@ -1,0 +1,51 @@
+# Build artifacts
+.build/
+*.app/
+
+# Python
+python/lib/photo-exporter
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+
+# Temporary files
+.temp/
+
+# Environment variables (secrets)
+.env
+
+# Specs/documentation
+specs/
+
+# Database files (contain photo metadata)
+*.db
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+/.build
+/Packages
+/*.xcodeproj
+xcuserdata/
+DerivedData/
+
+# Backup files
+*.orig
+*.bak
+*~
+
+# Log files
+*.log
+logs/
