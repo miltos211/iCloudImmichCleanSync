@@ -1,0 +1,62 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build Release
+        run: swift build -c release
+
+      - name: Create App Bundle
+        run: |
+          # Create .app bundle structure
+          mkdir -p ImmichUploader.app/Contents/MacOS
+          mkdir -p ImmichUploader.app/Contents/Resources
+
+          # Copy executable
+          cp .build/release/ImmichUploader ImmichUploader.app/Contents/MacOS/
+
+          # Copy Info.plist
+          cp Sources/App/Info.plist ImmichUploader.app/Contents/
+
+          # Make executable
+          chmod +x ImmichUploader.app/Contents/MacOS/ImmichUploader
+
+      - name: Create DMG
+        run: |
+          # Create a temporary directory for DMG contents
+          mkdir -p dmg_contents
+          cp -r ImmichUploader.app dmg_contents/
+
+          # Create symlink to Applications folder
+          ln -s /Applications dmg_contents/Applications
+
+          # Create DMG
+          hdiutil create -volname "ImmichUploader" -srcfolder dmg_contents -ov -format UDZO ImmichUploader.dmg
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ steps.version.outputs.VERSION }}
+          files: ImmichUploader.dmg
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
