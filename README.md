@@ -1,6 +1,17 @@
 # iCloudImmichCleanSync
 
+[![Release](https://img.shields.io/github/v/release/miltos211/iCloudImmichCleanSync?style=flat-square)](https://github.com/miltos211/iCloudImmichCleanSync/releases)
+[![License: MIT](https://img.shields.io/github/license/miltos211/iCloudImmichCleanSync?style=flat-square)](LICENSE)
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey?style=flat-square)
+![Swift 5.9](https://img.shields.io/badge/Swift-5.9-F05138?style=flat-square)
+![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square)
+
 A macOS app to automatically sync your entire iCloud Photo Library to Immich with full quality and metadata preservation.
+
+<!-- Demo video: in GitHub's web editor, drag cics-promo.mp4 onto the blank line below.
+     GitHub uploads it and inserts a URL on its own line, which renders as a player. -->
+
+<!-- /demo video -->
 
 ## Why This Exists
 
