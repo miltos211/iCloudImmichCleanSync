@@ -8,10 +8,9 @@
 
 A macOS app to automatically sync your entire iCloud Photo Library to Immich with full quality and metadata preservation.
 
-<!-- Demo video: in GitHub's web editor, drag cics-promo.mp4 onto the blank line below.
-     GitHub uploads it and inserts a URL on its own line, which renders as a player. -->
 
-<!-- /demo video -->
+https://github.com/user-attachments/assets/f625f1ef-018d-4e80-9b04-523f012b9f08
+
 
 ## Why This Exists
 
