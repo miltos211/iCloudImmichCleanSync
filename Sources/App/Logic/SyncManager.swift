@@ -6,6 +6,8 @@ import SwiftUI
 @MainActor
 class SyncManager: ObservableObject {
     @Published var isSyncing = false
+    @Published var isStopping = false
+    private var isCheckingDuplicates = false
     @Published var lastError: String?
     @Published var duplicateCheckProgress: String = ""
     @Published var duplicateCheckCurrent: Int = 0
@@ -26,8 +28,49 @@ class SyncManager: ObservableObject {
         self.modelContext.autosaveEnabled = false // We will save manually
     }
     
+    private var serverURL = ""
+    
     func configure(url: String, apiKey: String) {
+        self.serverURL = url
         self.immichClient = ImmichClient(baseURL: url, apiKey: apiKey)
+    }
+    
+    /// Connection check timeout in seconds (Settings > Connection check timeout). 8 is the recommended default.
+    private static var reachabilityTimeout: Int {
+        let value = UserDefaults.standard.integer(forKey: "reachabilityTimeout")
+        return value > 0 ? value : 8
+    }
+    
+    /// Runs before every sync / duplicate check. Fails fast with a clear message when Immich can't be reached.
+    private func ensureServerReachable(client: ImmichClient) async -> Bool {
+        let seconds = Self.reachabilityTimeout
+        do {
+            try await client.checkReachable(timeout: TimeInterval(seconds))
+            return true
+        } catch {
+            let url = URL(string: serverURL)
+            let host = url?.host ?? serverURL
+            let address = url?.port.map { "\(host):\($0)" } ?? host
+            if ImmichClient.isTimeout(error) {
+                lastError = "Can't reach Immich at \(address), health check got no answer after \(seconds)s."
+            } else if ImmichClient.isConnectivityError(error) {
+                lastError = "Can't reach Immich at \(address): \(error.localizedDescription)"
+            } else {
+                lastError = "Immich at \(address) answered unexpectedly: \(error.localizedDescription)"
+            }
+            Log("Server not reachable, not starting: \(lastError ?? "")", level: .error, category: "SyncManager")
+            return false
+        }
+    }
+    
+    /// Called when a request fails because the server became unreachable mid-sync: stop starting new work and
+    /// leave everything unfinished pending (no retry is burned).
+    private func connectionLost() {
+        guard !isStopping else { return }
+        isStopping = true
+        lastError = "Lost connection to Immich. Sync paused; press Start Sync once it is reachable again."
+        uploadProgress = "Connection lost - pausing"
+        Log("Connection to Immich lost, pausing sync", level: .error, category: "SyncManager")
     }
     
     func startSync() async {
@@ -37,10 +80,18 @@ class SyncManager: ObservableObject {
         }
         
         isSyncing = true
-        defer { isSyncing = false }
+        isStopping = false
+        lastError = nil
+        defer {
+            isSyncing = false
+            isStopping = false
+        }
+        
+        // 0. Is the server reachable at all? (every start/resume)
+        guard await ensureServerReachable(client: client) else { return }
         
         do {
-            // 1. Validate Connection
+            // 1. Validate Connection (API key)
             if try await !client.validateConnection() {
                 lastError = "Could not connect to Immich server"
                 return
@@ -58,21 +109,28 @@ class SyncManager: ObservableObject {
         }
     }
     
-    /// Public method to refresh library without uploading
+    /// Ask a running sync to stop. Assets already in flight finish (a few seconds, longer for big videos);
+    /// nothing new is started, and everything not finished stays pending for the next run.
+    func stopSync() {
+        guard isSyncing, !isStopping else { return }
+        isStopping = true
+        uploadProgress = "Stopping... finishing in-flight assets"
+        Log("Stop requested", category: "SyncManager")
+    }
+    
+    /// Delete every locally tracked asset (status, Immich ids). The next scan starts from scratch.
+    func resetDatabase() throws {
+        Log("Resetting local database", category: "SyncManager")
+        try modelContext.delete(model: Asset.self)
+        try modelContext.save()
+        refreshProgress = ""
+    }
+    
+    /// Public method to refresh library without uploading.
+    /// Merges with the existing database: known assets keep their status; only new ones are added.
     func scanLibrary() async throws {
         isRefreshing = true
         defer { isRefreshing = false }
-        
-        refreshProgress = "Clearing existing database..."
-        Log("Clearing existing assets from database", category: "SyncManager")
-        
-        // Delete all existing assets
-        let descriptor = FetchDescriptor<Asset>()
-        let allAssets = try modelContext.fetch(descriptor)
-        for asset in allAssets {
-            modelContext.delete(asset)
-        }
-        try modelContext.save()
         
         refreshProgress = "Scanning iCloud Photo Library..."
         Log("Scanning iCloud Photo Library", category: "SyncManager")
@@ -124,12 +182,14 @@ class SyncManager: ObservableObject {
         try updateDatabase(with: allAssetInfos)
         
         refreshProgress = "Refresh complete"
-        Log("Library refresh complete - \(allAssetInfos.count) assets added", category: "SyncManager")
+        Log("Library refresh complete", category: "SyncManager")
     }
     
     private func updateDatabase(with assetInfos: [AssetInfo]) throws {
-        // Since we cleared the database, all assets are new
-        for info in assetInfos {
+        // @Attribute(.unique) would upsert and reset status, so only insert ids we don't know yet
+        let existingIds = Set(try modelContext.fetch(FetchDescriptor<Asset>()).map { $0.id })
+        var added = 0
+        for info in assetInfos where !existingIds.contains(info.id) {
             let asset = Asset(
                 id: info.id,
                 originalFilename: "Pending...", // Don't know filename until export
@@ -137,10 +197,91 @@ class SyncManager: ObservableObject {
                 creationDate: Asset.parseDate(info.creationDate)
             )
             modelContext.insert(asset)
+            added += 1
         }
         
         try modelContext.save()
-        Log("Added \(assetInfos.count) new assets to database", category: "SyncManager")
+        Log("Added \(added) new assets to database (\(assetInfos.count - added) already known)", category: "SyncManager")
+    }
+    
+    /// Local export name without extension. The exporter names files `asset_<localIdentifier with / as _>.<ext>`,
+    /// and Immich keeps that as the original file name, so it identifies an asset on the server.
+    private static func exportStem(forLocalId id: String) -> String {
+        "asset_" + id.replacingOccurrences(of: "/", with: "_")
+    }
+    
+    /// Marks pending assets the server already has as completed, without exporting anything.
+    /// 1) by file name (list of the server's assets), 2) by stored SHA-1 for the rest. Returns how many were marked.
+    @discardableResult
+    private func dropServerDuplicates(client: ImmichClient, assets: [Asset]) async -> Int {
+        var marked = 0
+        
+        do {
+            duplicateCheckProgress = "Reading assets from server..."
+            let serverAssets = try await client.listServerAssets { count in
+                self.duplicateCheckProgress = "Reading assets from server... \(count)"
+            }
+            
+            var idByStem: [String: String] = [:]
+            for sa in serverAssets {
+                idByStem[(sa.originalFileName as NSString).deletingPathExtension] = sa.id
+            }
+            let appNamed = idByStem.keys.filter { $0.hasPrefix("asset_") }.count
+            Log("Server has \(serverAssets.count) assets, \(appNamed) named like this app's exports (asset_*). Sample: \(serverAssets.prefix(3).map { $0.originalFileName }.joined(separator: ", "))", category: "SyncManager")
+            
+            for (i, asset) in assets.enumerated() {
+                if let existingId = idByStem[Self.exportStem(forLocalId: asset.id)] {
+                    asset.status = "completed"
+                    asset.immichId = existingId
+                    asset.processedAt = Date()
+                    marked += 1
+                }
+                if i % 200 == 0 { duplicateCheckCurrent = i; await Task.yield() }
+            }
+            try modelContext.save()
+            Log("Matched \(marked) of \(assets.count) pending assets by file name", category: "SyncManager")
+        } catch {
+            Log("Name-based duplicate check failed: \(error.localizedDescription)", level: .error, category: "SyncManager")
+        }
+        
+        // Anything exported before has a checksum, which also catches files that were renamed on the server
+        let remaining = assets.filter { $0.status == "pending" }
+        let withHash = remaining.filter { $0.sha1 != nil }.count
+        if withHash > 0 {
+            marked += await markExistingOnServer(client: client, assets: remaining)
+        }
+        duplicateCheckCurrent = assets.count
+        return marked
+    }
+    
+    /// Marks assets whose checksum the server already has as completed. Assets without a sha1 are ignored.
+    /// Returns how many were marked. A failed chunk is logged and skipped (those assets just get uploaded normally).
+    @discardableResult
+    private func markExistingOnServer(client: ImmichClient, assets: [Asset]) async -> Int {
+        let checkable = assets.filter { $0.sha1 != nil }
+        var marked = 0
+        
+        for start in stride(from: 0, to: checkable.count, by: 500) {
+            if (!isSyncing && !isCheckingDuplicates) || isStopping { break }
+            let chunk = Array(checkable[start..<min(start + 500, checkable.count)])
+            
+            do {
+                let duplicates = try await client.bulkUploadCheck(chunk.map { .init(id: $0.id, checksum: $0.sha1!) })
+                for asset in chunk {
+                    if let existingId = duplicates[asset.id] {
+                        asset.status = "completed"
+                        asset.immichId = existingId
+                        asset.processedAt = Date()
+                        marked += 1
+                    }
+                }
+                try modelContext.save()
+            } catch {
+                Log("Failed to check chunk at \(start): \(error.localizedDescription)", level: .error, category: "SyncManager")
+            }
+            duplicateCheckCurrent = min(start + chunk.count, checkable.count)
+        }
+        return marked
     }
     
     /// Manually check for duplicates on server without uploading
@@ -153,12 +294,19 @@ class SyncManager: ObservableObject {
             return
         }
         
+        isCheckingDuplicates = true
+        defer { isCheckingDuplicates = false }
+        
         do {
             duplicateCheckProgress = "Connecting to server..."
             duplicateCheckCurrent = 0
             duplicateCheckTotal = 0
             
-            // Validate connection first
+            // Reachable at all? (Tailscale/VPN), then is the API key accepted?
+            guard await ensureServerReachable(client: client) else {
+                duplicateCheckProgress = "Server unreachable"
+                return
+            }
             if try await !client.validateConnection() {
                 Log("Could not connect to Immich server", level: .error, category: "SyncManager")
                 duplicateCheckProgress = "Connection failed"
@@ -181,40 +329,9 @@ class SyncManager: ObservableObject {
             }
             
             duplicateCheckTotal = pendingAssets.count
-            Log("Checking \(pendingAssets.count) assets for duplicates...", level: .info, category: "SyncManager")
+            Log("Checking \(pendingAssets.count) pending assets for duplicates...", level: .info, category: "SyncManager")
             
-            // Use same deviceId as old Python script for compatibility
-            let deviceId = "photo-sync-script"
-            var markedCount = 0
-            
-            // Check in chunks of 500
-            let chunks = stride(from: 0, to: pendingAssets.count, by: 500).map {
-                Array(pendingAssets[$0..<min($0 + 500, pendingAssets.count)])
-            }
-            
-            for (index, chunk) in chunks.enumerated() {
-                let idsToCheck = chunk.map { $0.id }
-                
-                do {
-                    let existingIds = try await client.checkAssets(deviceAssetIds: idsToCheck, deviceId: deviceId)
-                    let existingSet = Set(existingIds)
-                    
-                    for (assetIndex, asset) in chunk.enumerated() {
-                        duplicateCheckCurrent = (index * 500) + assetIndex + 1
-                        duplicateCheckProgress = "Checking asset \(duplicateCheckCurrent) / \(duplicateCheckTotal)"
-                        
-                        if existingSet.contains(asset.id) {
-                            asset.status = "completed"
-                            asset.immichId = "existing"
-                            asset.processedAt = Date()
-                            markedCount += 1
-                        }
-                    }
-                    try modelContext.save()
-                } catch {
-                    Log("Failed to check chunk: \(error.localizedDescription)", level: .error, category: "SyncManager")
-                }
-            }
+            let markedCount = await dropServerDuplicates(client: client, assets: pendingAssets)
             
             duplicateCheckProgress = "Found \(markedCount) duplicates"
             Log("Duplicate check complete: \(markedCount) assets already exist on server", level: .info, category: "SyncManager")
@@ -242,42 +359,13 @@ class SyncManager: ObservableObject {
             return 
         }
         
+        // Same device id the old Python script used (still sent on upload for compatibility)
+        let deviceId = "photo-sync-script"
+        
         uploadProgress = "Checking for duplicates..."
-        
-        // Deduplication Step: Check presence on server
-        // Using same deviceId as old Python script for compatibility
-        let deviceId = "photo-sync-script" 
-        
-        // Bulk check in chunks of 500
-        let chunks = stride(from: 0, to: pendingAssets.count, by: 500).map {
-            Array(pendingAssets[$0..<min($0 + 500, pendingAssets.count)])
-        }
-        
-        for chunk in chunks {
-            if !isSyncing { break }
-            
-            let idsToCheck = chunk.map { $0.id }
-            
-            do {
-                Log("Checking existence for \(idsToCheck.count) assets...", level: .debug, category: "SyncManager")
-                let existingIds = try await client.checkAssets(deviceAssetIds: idsToCheck, deviceId: deviceId)
-                let existingSet = Set(existingIds)
-                
-                // Map results
-                for asset in chunk {
-                    if existingSet.contains(asset.id) { // using asset.id as deviceAssetId
-                        Log("Skipping existing asset: \(asset.id)", level: .debug, category: "SyncManager")
-                        asset.status = "completed"
-                        asset.immichId = "existing" // We don't get the UUID back from this endpoint, but that's fine for dedupe
-                        asset.processedAt = Date()
-                    }
-                }
-                try modelContext.save()
-            } catch {
-                Log("Failed to check asset existence: \(error.localizedDescription)", level: .error, category: "SyncManager")
-                // Continue, will try to upload and fail/dedupe there if needed
-            }
-        }
+        // Match against what is already on the server (by name, then by stored checksum) before exporting anything.
+        // Files that match neither are checked once more, by checksum, right after their export.
+        await dropServerDuplicates(client: client, assets: pendingAssets)
         
         // Re-fetch only those still pending after check
         // Note: In a real app we might optimize this, but this ensures we don't process completed ones
@@ -298,57 +386,121 @@ class SyncManager: ObservableObject {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("immich_upload")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         
-        for (index, asset) in assetsToUpload.enumerated() {
-            if !isSyncing { break }
-            
-            uploadCurrent = index + 1
-            uploadProgress = "Uploading asset \(uploadCurrent) / \(uploadTotal)"
-            
-            do {
-                Log("Processing asset \(uploadCurrent)/\(uploadTotal): \(asset.id)", category: "SyncManager")
-                
-                // Export
-                let exportResult = try await photoManager.exportAsset(
-                    assetId: asset.id,
-                    outputDirectory: tempDir.path
-                )
-                
-                // Update filename in DB
-                asset.originalFilename = exportResult.metadata.originalFilename
-                
-                Log("Uploading \(exportResult.metadata.originalFilename) (\(exportResult.metadata.fileSize / 1024 / 1024) MB)", category: "SyncManager")
-                
-                // Upload
-                let immichId = try await client.uploadAsset(
-                    fileUrl: URL(fileURLWithPath: exportResult.filePath),
-                    assetId: asset.id,
-                    metadata: exportResult.metadata,
-                    deviceId: deviceId
-                )
-                
-                // Success
-                asset.status = "completed"
-                asset.immichId = immichId
-                asset.processedAt = Date()
-                asset.fileSize = exportResult.metadata.fileSize
-                
-                Log("Successfully uploaded: \(exportResult.metadata.originalFilename)", level: .info, category: "SyncManager")
-                
-                // Cleanup
-                try? FileManager.default.removeItem(atPath: exportResult.filePath)
-                
-                try modelContext.save()
-                
-            } catch {
-                Log("Failed to upload asset \(asset.id): \(error.localizedDescription)", level: .error, category: "SyncManager")
-                asset.status = "failed"
-                asset.errorMessage = error.localizedDescription
-                asset.retryCount += 1
-                try? modelContext.save()
+        // Each asset costs several ~200 ms round trips to the server plus an iCloud export, so run a few at once
+        let workers = Self.uploadConcurrency
+        Log("Processing \(uploadTotal) assets with \(workers) parallel workers", category: "SyncManager")
+        
+        await withTaskGroup(of: Void.self) { group in
+            var running = 0
+            for asset in assetsToUpload {
+                if !isSyncing || isStopping { break }
+                if running >= workers {
+                    await group.next()
+                    running -= 1
+                }
+                group.addTask { @MainActor in
+                    await self.processAsset(asset, client: client, tempDir: tempDir, deviceId: deviceId)
+                }
+                running += 1
             }
+            await group.waitForAll()
         }
         
-        uploadProgress = "Upload complete"
-        Log("Upload complete: \(uploadCurrent) assets processed", category: "SyncManager")
+        if isStopping && lastError != nil {
+            uploadProgress = "Paused (connection lost) after \(uploadCurrent) of \(uploadTotal)"
+            Log("Sync paused: \(uploadCurrent) of \(uploadTotal) assets processed, the rest stay pending", category: "SyncManager")
+        } else if isStopping {
+            uploadProgress = "Stopped after \(uploadCurrent) of \(uploadTotal)"
+            Log("Sync stopped: \(uploadCurrent) of \(uploadTotal) assets processed, the rest stay pending", category: "SyncManager")
+        } else {
+            uploadProgress = "Upload complete"
+            Log("Upload complete: \(uploadCurrent) assets processed", category: "SyncManager")
+        }
+    }
+    
+    /// Number of assets processed at the same time (Settings > Parallel uploads, default 4).
+    private static var uploadConcurrency: Int {
+        let value = UserDefaults.standard.integer(forKey: "uploadConcurrency")
+        return value > 0 ? min(value, 8) : 4
+    }
+    
+    /// Export -> hash -> server check -> upload for one asset. Failures are recorded on the asset, never thrown.
+    private func processAsset(_ asset: Asset, client: ImmichClient, tempDir: URL, deviceId: String) async {
+        var exportedPath: String?
+        defer {
+            if let exportedPath { try? FileManager.default.removeItem(atPath: exportedPath) }
+            uploadCurrent += 1
+            uploadProgress = "Processed \(uploadCurrent) / \(uploadTotal)"
+        }
+        
+        func ms(since start: Date) -> Int { Int(Date().timeIntervalSince(start) * 1000) }
+        
+        do {
+            Log("Processing asset: \(asset.id)", level: .debug, category: "SyncManager")
+            
+            // Export
+            var t = Date()
+            let exportResult = try await photoManager.exportAsset(
+                assetId: asset.id,
+                outputDirectory: tempDir.path
+            )
+            exportedPath = exportResult.filePath
+            let exportMs = ms(since: t)
+            let name = exportResult.metadata.originalFilename
+            asset.originalFilename = name
+            
+            // Hash the exported file so later runs can skip it without exporting again
+            t = Date()
+            let fileURL = URL(fileURLWithPath: exportResult.filePath)
+            let sha1 = try await Checksum.sha1Hex(of: fileURL)
+            asset.sha1 = sha1
+            asset.fileSize = exportResult.metadata.fileSize
+            try modelContext.save()
+            let hashMs = ms(since: t)
+            
+            // Server already has this exact file? Skip the upload.
+            t = Date()
+            let known = (try? await client.bulkUploadCheck([.init(id: asset.id, checksum: sha1)])) ?? [:]
+            let checkMs = ms(since: t)
+            if let existingId = known[asset.id] {
+                asset.status = "completed"
+                asset.immichId = existingId
+                asset.processedAt = Date()
+                try modelContext.save()
+                Log("Already on server, skipped upload: \(name) immichId=\(existingId) [export \(exportMs) ms, hash \(hashMs) ms, check \(checkMs) ms]", category: "SyncManager")
+                return
+            }
+            
+            // Upload
+            t = Date()
+            let sizeKB = exportResult.metadata.fileSize / 1024
+            let immichId = try await client.uploadAsset(
+                fileUrl: fileURL,
+                assetId: asset.id,
+                metadata: exportResult.metadata,
+                deviceId: deviceId
+            )
+            let uploadMs = ms(since: t)
+            
+            asset.status = "completed"
+            asset.immichId = immichId
+            asset.processedAt = Date()
+            try modelContext.save()
+            
+            let rate = uploadMs > 0 ? String(format: "%.2f", Double(sizeKB) / 1024.0 / (Double(uploadMs) / 1000.0)) : "-"
+            Log("Uploaded \(name) (\(sizeKB) KB) [export \(exportMs) ms, hash \(hashMs) ms, check \(checkMs) ms, upload \(uploadMs) ms = \(rate) MB/s]", category: "SyncManager")
+        } catch {
+            if ImmichClient.isConnectivityError(error) {
+                // Not this asset's fault: leave it pending (no retry burned) and pause the whole sync
+                Log("Connection problem on asset \(asset.id), leaving it pending: \(error.localizedDescription)", level: .error, category: "SyncManager")
+                connectionLost()
+                return
+            }
+            Log("Failed to upload asset \(asset.id): \(error.localizedDescription)", level: .error, category: "SyncManager")
+            asset.status = "failed"
+            asset.errorMessage = error.localizedDescription
+            asset.retryCount += 1
+            try? modelContext.save()
+        }
     }
 }

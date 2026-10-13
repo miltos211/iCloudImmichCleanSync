@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import ImmichShared
 
 struct SettingsView: View {
@@ -8,7 +9,11 @@ struct SettingsView: View {
     @AppStorage("syncVideos") private var syncVideos = true
     @AppStorage("uploadScreenshots") private var uploadScreenshots = false
     @AppStorage("deleteLocal") private var deleteLocal = false
+    @AppStorage("uploadConcurrency") private var uploadConcurrency = 4
+    @AppStorage("reachabilityTimeout") private var reachabilityTimeout = 8
     
+    @EnvironmentObject var syncManager: SyncManager
+    @State private var showResetConfirm = false
     @State private var showAlert = false
     @State private var alertTitle = ""
     @State private var alertMessage = ""
@@ -22,6 +27,8 @@ struct SettingsView: View {
                 
                 SecureField("API Key", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
+                
+                Stepper("Connection check timeout: \(reachabilityTimeout) s (recommended: 8)", value: $reachabilityTimeout, in: 2...60)
                 
                 Button("Test Connection") {
                     Task {
@@ -61,6 +68,7 @@ struct SettingsView: View {
                 Toggle("Include Pictures", isOn: $syncPictures)
                 Toggle("Include Videos", isOn: $syncVideos)
                 Toggle("Include Screenshots", isOn: $uploadScreenshots)
+                Stepper("Parallel uploads: \(uploadConcurrency)", value: $uploadConcurrency, in: 1...8)
             }
             
             Section("Danger Zone") {
@@ -68,13 +76,28 @@ struct SettingsView: View {
                     .tint(.red)
                 
                 Button("Reset Database") {
-                    // TODO: Reset DB
+                    showResetConfirm = true
                 }
                 .foregroundStyle(.red)
+                .disabled(syncManager.isSyncing)
             }
         }
         .formStyle(.grouped)
         .padding()
+        .confirmationDialog("Reset local database?", isPresented: $showResetConfirm) {
+            Button("Delete and rescan next time", role: .destructive) {
+                do {
+                    try syncManager.resetDatabase()
+                } catch {
+                    alertTitle = "Reset failed"
+                    alertMessage = error.localizedDescription
+                    showAlert = true
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Forgets which photos were uploaded. The next sync will export every photo again before the server can skip duplicates.")
+        }
         .alert(alertTitle, isPresented: $showAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -85,4 +108,5 @@ struct SettingsView: View {
 
 #Preview {
     SettingsView()
+        .environmentObject(SyncManager(modelContainer: try! ModelContainer(for: Asset.self)))
 }

@@ -20,6 +20,7 @@ struct AssetGridView: View {
     @State private var showImagePreview = false
     @State private var showRefreshProgress = false
     @State private var showUploadProgress = false
+    @State private var syncErrorMessage: String?
     
     enum AssetFilter: String, CaseIterable, Identifiable {
         case all = "All"
@@ -96,6 +97,7 @@ struct AssetGridView: View {
                         await syncManager.startSync()
                         try? await Task.sleep(for: .seconds(2)) // Show completion for 2 seconds
                         showUploadProgress = false
+                        syncErrorMessage = syncManager.lastError
                     }
                 } label: {
                     Label(syncManager.isSyncing ? "Syncing..." : "Sync Now", systemImage: "arrow.triangle.2.circlepath")
@@ -188,12 +190,20 @@ struct AssetGridView: View {
                         .font(.headline)
                 }
                 
-                Text("Please wait...")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button(role: .cancel) {
+                    syncManager.stopSync()
+                } label: {
+                    Label(syncManager.isStopping ? "Stopping..." : "Stop", systemImage: "stop.fill")
+                }
+                .disabled(syncManager.isStopping)
             }
-            .frame(width: 350, height: 200)
+            .frame(width: 350, height: 220)
             .padding()
+        }
+        .alert("Sync problem", isPresented: Binding(get: { syncErrorMessage != nil }, set: { if !$0 { syncErrorMessage = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(syncErrorMessage ?? "")
         }
         .sheet(isPresented: $showImagePreview) {
             if let asset = selectedAsset {

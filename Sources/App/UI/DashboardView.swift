@@ -19,6 +19,14 @@ struct DashboardView: View {
     private var processedCount: Int { completedAssets.count }
     private var totalCount: Int { assets.count }
     
+    @ViewBuilder
+    private var metricCards: some View {
+        MetricCard(title: "Photos", value: "\(processedCount)", icon: "photo.stack")
+        MetricCard(title: "Remaining", value: "\(totalCount - processedCount)", icon: "hourglass")
+        // MetricCard(title: "Speed", value: "12.5 MB/s", icon: "speedometer")
+        MetricCard(title: "Errors", value: "\(failedAssets.count)", icon: "exclamationmark.triangle", color: failedAssets.isEmpty ? .secondary : .red)
+    }
+    
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
@@ -46,7 +54,7 @@ struct DashboardView: View {
                             .foregroundStyle(syncManager.isSyncing ? Color.purple.gradient : Color.secondary.gradient)
                             .symbolEffect(.bounce, value: syncManager.isSyncing)
                         
-                        Text(syncManager.isSyncing ? "Syncing..." : "Ready")
+                        Text(syncManager.isStopping ? "Stopping..." : (syncManager.isSyncing ? "Syncing..." : "Ready"))
                             .font(.title2)
                             .fontWeight(.bold)
                         
@@ -63,10 +71,16 @@ struct DashboardView: View {
                 HStack {
                     if syncManager.isSyncing {
                         Button(role: .cancel) {
-                            // TODO: Add stop logic
+                            syncManager.stopSync()
                         } label: {
-                            Label("Stop Sync", systemImage: "stop.fill")
+                            Label(syncManager.isStopping ? "Stopping..." : "Stop Sync", systemImage: "stop.fill")
+                                .font(.title3)
+                                .frame(minWidth: 150)
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.large)
+                        .disabled(syncManager.isStopping)
                     } else {
                         Button {
                             syncManager.configure(url: immichUrl, apiKey: apiKey)
@@ -91,13 +105,14 @@ struct DashboardView: View {
                 }
                 
                 // Metrics Grid
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 16) {
-                    MetricCard(title: "Photos", value: "\(processedCount)", icon: "photo.stack")
-                    MetricCard(title: "Remaining", value: "\(totalCount - processedCount)", icon: "hourglass")
-                    // MetricCard(title: "Speed", value: "12.5 MB/s", icon: "speedometer")
-                    MetricCard(title: "Errors", value: "\(failedAssets.count)", icon: "exclamationmark.triangle", color: failedAssets.isEmpty ? .secondary : .red)
+                // Centered under the Start Sync button; stacks vertically if the window is too narrow for three tiles
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 16) { metricCards }
+                    VStack(spacing: 16) { metricCards }
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal)
+                .padding(.bottom, 24)
             }
         }
         .background(Color(NSColor.windowBackgroundColor))
@@ -127,7 +142,7 @@ struct MetricCard: View {
                 .foregroundStyle(.secondary)
         }
         .padding()
-        .frame(height: 100)
+        .frame(width: 160, height: 100)
         .background(Material.ultraThin, in: RoundedRectangle(cornerRadius: 12))
     }
 }

@@ -14,6 +14,7 @@ final class Asset {
     var processedAt: Date?
     var fileSize: Int?
     var uploadDuration: Double?
+    var sha1: String? // hex SHA-1 of the exported file; set after first export
     
     init(id: String, originalFilename: String, assetType: String, creationDate: Date, status: String = "pending") {
         self.id = id
