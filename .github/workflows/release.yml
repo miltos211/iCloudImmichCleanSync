@@ -24,6 +24,9 @@ jobs:
       - name: Build Release (Universal Binary)
         run: swift build -c release --arch arm64 --arch x86_64
 
+      - name: Generate App Icon
+        run: ./make-icon.sh
+
       - name: Create App Bundle
         run: |
           # Create .app bundle structure
@@ -32,6 +35,9 @@ jobs:
 
           # Copy executable (universal binary path is different)
           cp .build/apple/Products/Release/ImmichUploader ImmichUploader.app/Contents/MacOS/
+
+          # Copy icon (generated from Resources/AppIcon-source.png)
+          cp .build/icon/AppIcon.icns ImmichUploader.app/Contents/Resources/
 
           # Copy Info.plist
           cp Sources/App/Info.plist ImmichUploader.app/Contents/

@@ -135,6 +135,14 @@ Copy `.env.template` to `.env` and add your Immich server URL and API key.
 
 Run the app and configure your Immich server connection in Settings. Select which media types to sync and start the sync process.
 
+**First launch of a downloaded release:** the app is not signed or notarized, so macOS blocks it the first time. Either open **System Settings > Privacy & Security**, scroll down to the message about ImmichUploader and click **Open Anyway**, or run this once in Terminal:
+
+```bash
+xattr -cr /Applications/ImmichUploader.app
+```
+
+macOS will then ask for access to your Photos library. Allow access to your whole library so every photo can be synced.
+
 ### Python CLI
 
 ```bash

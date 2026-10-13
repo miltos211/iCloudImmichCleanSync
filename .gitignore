@@ -49,3 +49,6 @@ DerivedData/
 # Log files
 *.log
 logs/
+# Local helper scripts
+start.sh
+rebuild.sh

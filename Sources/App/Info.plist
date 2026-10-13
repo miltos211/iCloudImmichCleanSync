@@ -4,6 +4,10 @@
 <dict>
     <key>CFBundleIdentifier</key>
     <string>com.immich.uploader</string>
+    <key>CFBundleExecutable</key>
+    <string>ImmichUploader</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleName</key>
     <string>ImmichUploader</string>
     <key>CFBundlePackageType</key>
@@ -12,6 +16,8 @@
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Immich Uploader needs access to your photo library to sync photos to your server.</string>
     <key>NSAppTransportSecurity</key>
