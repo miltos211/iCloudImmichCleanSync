@@ -108,5 +108,5 @@ struct SettingsView: View {
 
 #Preview {
     SettingsView()
-        .environmentObject(SyncManager(modelContainer: try! ModelContainer(for: Asset.self)))
+        .environmentObject(SyncManager(modelContainer: try! ModelContainer(for: Asset.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))))
 }

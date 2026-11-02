@@ -10,7 +10,7 @@ struct ImmichUploaderApp: App {
     
     init() {
         do {
-            let modelContainer = try ModelContainer(for: Asset.self)
+            let modelContainer = try ModelContainer(for: Asset.self, configurations: ModelConfiguration(url: AssetStore.url()))
             _syncManager = StateObject(wrappedValue: SyncManager(modelContainer: modelContainer))
             self.container = modelContainer
         } catch {
